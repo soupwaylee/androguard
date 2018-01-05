@@ -9,7 +9,7 @@ from builtins import range
 from builtins import object
 from androguard.core import androconf
 from androguard.core.bytecodes.dvm_permissions import DVM_PERMISSIONS
-from androguard.util import read
+from androguard.util import read, get_certificate_name_string
 
 from androguard.core.bytecodes.axml import ARSCParser, AXMLPrinter, ARSCResTableConfig
 
@@ -19,8 +19,11 @@ import re
 import sys
 import binascii
 import zipfile
+import logging
 
-from xml.dom import minidom
+import lxml.sax
+from xml.dom.pulldom import SAX2DOM
+from lxml import etree
 
 # Used for reading Certificates
 from pyasn1.codec.der.decoder import decode
@@ -30,17 +33,15 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 
 NS_ANDROID_URI = 'http://schemas.android.com/apk/res/android'
+NS_ANDROID = '{http://schemas.android.com/apk/res/android}'
+
+log = logging.getLogger("androguard.apk")
 
 
-def sign_apk(filename, keystore, storepass):
-    from subprocess import Popen, PIPE, STDOUT
-    # TODO use apksigner instead of jarsigner
-    cmd = Popen([androconf.CONF["PATH_JARSIGNER"], "-sigalg", "MD5withRSA",
-                     "-digestalg", "SHA1", "-storepass", storepass, "-keystore",
-                     keystore, filename, "alias_name"],
-                    stdout=PIPE,
-                    stderr=STDOUT)
-    stdout, stderr = cmd.communicate()
+def parse_lxml_dom(tree):
+    handler = SAX2DOM()
+    lxml.sax.saxify(tree, handler)
+    return handler.document
 
 
 class Error(Exception):
@@ -58,32 +59,31 @@ class BrokenAPKError(Error):
 
 ######################################################## APK FORMAT ########################################################
 class APK(object):
-    """
-        This class can access to all elements in an APK file
-
-        :param filename: specify the path of the file, or raw data
-        :param raw: specify if the filename is a path or raw data (optional)
-        :param magic_file: specify the magic file (optional)
-        :param skip_analysis: Skip the analysis, e.g. no manifest files are read. (default: False)
-        :param testzip: Test the APK for integrity, e.g. if the ZIP file is broken. Throw an exception on failure (default False)
-
-        :type filename: string
-        :type raw: boolean
-        :type magic_file: string
-        :type skip_analysis: boolean
-        :type testzip: boolean
-
-        :Example:
-          APK("myfile.apk")
-          APK(read("myfile.apk"), raw=True)
-    """
-
     def __init__(self,
                  filename,
                  raw=False,
                  magic_file=None,
                  skip_analysis=False,
                  testzip=False):
+        """
+            This class can access to all elements in an APK file
+
+            :param filename: specify the path of the file, or raw data
+            :param raw: specify if the filename is a path or raw data (optional)
+            :param magic_file: specify the magic file (optional)
+            :param skip_analysis: Skip the analysis, e.g. no manifest files are read. (default: False)
+            :param testzip: Test the APK for integrity, e.g. if the ZIP file is broken. Throw an exception on failure (default False)
+
+            :type filename: string
+            :type raw: boolean
+            :type magic_file: string
+            :type skip_analysis: boolean
+            :type testzip: boolean
+
+            :Example:
+              APK("myfile.apk")
+              APK(read("myfile.apk"), raw=True)
+        """
         self.filename = filename
 
         self.xml = {}
@@ -140,47 +140,37 @@ class APK(object):
                 self.xml[i] = None
                 raw_xml = self.axml[i].get_buff()
                 if len(raw_xml) == 0:
-                    androconf.warning("AXML parsing failed, file is empty")
+                    log.warning("AXML parsing failed, file is empty")
                 else:
                     try:
                         if self.axml[i].is_packed():
-                            androconf.warning("XML Seems to be packed, parsing is very likely to fail.")
-                        self.xml[i] = minidom.parseString(raw_xml)
+                            log.warning("XML Seems to be packed, parsing is very likely to fail.")
+                        self.xml[i] = self.axml[i].get_xml_obj()
                     except Exception as e:
-                        androconf.warning("reading AXML as XML failed: " + str(e))
+                        log.warning("reading AXML as XML failed: " + str(e))
 
                 if self.xml[i] is not None:
-                    self.package = self.xml[i].documentElement.getAttribute(
-                        "package")
-                    self.androidversion[
-                        "Code"
-                    ] = self.xml[i].documentElement.getAttributeNS(
-                        NS_ANDROID_URI, "versionCode")
-                    self.androidversion[
-                        "Name"
-                    ] = self.xml[i].documentElement.getAttributeNS(
-                        NS_ANDROID_URI, "versionName")
+                    self.package = self.xml[i].get("package")
+                    self.androidversion["Code"] = self.xml[i].get(
+                        NS_ANDROID + "versionCode")
+                    self.androidversion["Name"] = self.xml[i].get(
+                        NS_ANDROID + "versionName")
 
-                    for item in self.xml[i].getElementsByTagName('uses-permission'):
-                        self.permissions.append(str(item.getAttributeNS(
-                            NS_ANDROID_URI, "name")))
+                    for item in self.xml[i].findall('uses-permission'):
+                        self.permissions.append(item.get(NS_ANDROID + "name"))
 
                     # getting details of the declared permissions
-                    for d_perm_item in self.xml[i].getElementsByTagName('permission'):
+                    for d_perm_item in self.xml[i].findall('permission'):
                         d_perm_name = self._get_res_string_value(str(
-                            d_perm_item.getAttributeNS(NS_ANDROID_URI, "name")))
+                            d_perm_item.get(NS_ANDROID + "name")))
                         d_perm_label = self._get_res_string_value(str(
-                            d_perm_item.getAttributeNS(NS_ANDROID_URI,
-                                                       "label")))
+                            d_perm_item.get(NS_ANDROID + "label")))
                         d_perm_description = self._get_res_string_value(str(
-                            d_perm_item.getAttributeNS(NS_ANDROID_URI,
-                                                       "description")))
+                            d_perm_item.get(NS_ANDROID + "description")))
                         d_perm_permissionGroup = self._get_res_string_value(str(
-                            d_perm_item.getAttributeNS(NS_ANDROID_URI,
-                                                       "permissionGroup")))
+                            d_perm_item.get(NS_ANDROID + "permissionGroup")))
                         d_perm_protectionLevel = self._get_res_string_value(str(
-                            d_perm_item.getAttributeNS(NS_ANDROID_URI,
-                                                       "protectionLevel")))
+                            d_perm_item.get(NS_ANDROID + "protectionLevel")))
 
                         d_perm_details = {
                             "label": d_perm_label,
@@ -206,6 +196,8 @@ class APK(object):
         """
         # Upon pickling, we need to remove the ZipFile
         x = self.__dict__
+        x['axml'] = str(x['axml'])
+        x['xml'] = str(x['xml'])
         del x['zip']
 
         return x
@@ -268,7 +260,6 @@ class APK(object):
             # No App name set
             # TODO return packagename instead?
             return ""
-
         if app_name.startswith("@"):
             res_id = int(app_name[1:], 16)
             res_parser = self.get_android_resources()
@@ -278,7 +269,7 @@ class APK(object):
                     res_id,
                     ARSCResTableConfig.default_config())[0][1]
             except Exception as e:
-                androconf.warning("Exception selecting app name: %s" % e)
+                log.warning("Exception selecting app name: %s" % e)
                 app_name = ""
         return app_name
 
@@ -287,6 +278,14 @@ class APK(object):
             Return the first non-greater density than max_dpi icon file name,
             unless exact icon resolution is set in the manifest, in which case
             return the exact file
+
+            From https://developer.android.com/guide/practices/screens_support.html
+            ldpi (low) ~120dpi
+            mdpi (medium) ~160dpi
+            hdpi (high) ~240dpi
+            xhdpi (extra-high) ~320dpi
+            xxhdpi (extra-extra-high) ~480dpi
+            xxxhdpi (extra-extra-extra-high) ~640dpi
 
             :rtype: string
         """
@@ -326,7 +325,7 @@ class APK(object):
                         app_icon = file_name
                         current_dpi = dpi
             except Exception as e:
-                androconf.warning("Exception selecting app icon: %s" % e)
+                log.warning("Exception selecting app icon: %s" % e)
 
         return app_icon
 
@@ -500,11 +499,23 @@ class APK(object):
             yield self.get_file("classes.dex")
 
             # Multidex support
-            basename = "classes%d.dex"
-            for i in range(2, sys.maxsize):
-                yield self.get_file(basename % i)
+            dexre = re.compile("^classes(\d+).dex$")
+            for file in self.get_files():
+                if dexre.search(file):
+                    yield self.get_file(file)
         except FileNotPresent:
             pass
+
+    def is_multidex(self):
+        """
+        Test if the APK has multiple DEX files
+
+        :return: True if multiple dex found, otherwise False
+        """
+        dexre = re.compile("^classes(\d+)?.dex$")
+        return len(
+            [instance for instance in self.get_files() if dexre.search(instance)]
+        ) > 1
 
     def get_elements(self, tag_name, attribute):
         """
@@ -515,11 +526,11 @@ class APK(object):
         """
         l = []
         for i in self.xml:
-            for item in self.xml[i].getElementsByTagName(tag_name):
-                value = item.getAttributeNS(NS_ANDROID_URI, attribute)
+            for item in self.xml[i].findall('.//' + tag_name):
+                value = item.get(NS_ANDROID + attribute)
                 value = self.format_value(value)
 
-                l.append(value.encode('utf-8'))
+                l.append(value)
         return l
 
     def format_value(self, value):
@@ -548,13 +559,13 @@ class APK(object):
         for i in self.xml:
             if self.xml[i] is None:
                 continue
-            tag = self.xml[i].getElementsByTagName(tag_name)
-            if tag is None:
+            tag = self.xml[i].findall('.//' + tag_name)
+            if len(tag) == 0:
                 return None
             for item in tag:
                 skip_this_item = False
                 for attr, val in list(attribute_filter.items()):
-                    attr_val = item.getAttributeNS(NS_ANDROID_URI, attr)
+                    attr_val = item.get(NS_ANDROID + attr)
                     if attr_val != val:
                         skip_this_item = True
                         break
@@ -562,9 +573,9 @@ class APK(object):
                 if skip_this_item:
                     continue
 
-                value = item.getAttributeNS(NS_ANDROID_URI, attribute)
+                value = item.get(NS_ANDROID + attribute)
 
-                if len(value) > 0:
+                if value is not None:
                     return value
         return None
 
@@ -578,25 +589,25 @@ class APK(object):
         y = set()
 
         for i in self.xml:
-            activities_and_aliases = self.xml[i].getElementsByTagName("activity") + \
-                                     self.xml[i].getElementsByTagName("activity-alias")
+            activities_and_aliases = self.xml[i].findall(".//activity") + \
+                                     self.xml[i].findall(".//activity-alias")
 
             for item in activities_and_aliases:
                 # Some applications have more than one MAIN activity.
                 # For example: paid and free content
-                activityEnabled = item.getAttributeNS(NS_ANDROID_URI, "enabled")
+                activityEnabled = item.get(NS_ANDROID + "enabled")
                 if activityEnabled is not None and activityEnabled != "" and activityEnabled == "false":
                     continue
 
-                for sitem in item.getElementsByTagName("action"):
-                    val = sitem.getAttributeNS(NS_ANDROID_URI, "name")
+                for sitem in item.findall(".//action"):
+                    val = sitem.get(NS_ANDROID + "name")
                     if val == "android.intent.action.MAIN":
-                        x.add(item.getAttributeNS(NS_ANDROID_URI, "name"))
+                        x.add(item.get(NS_ANDROID + "name"))
 
-                for sitem in item.getElementsByTagName("category"):
-                    val = sitem.getAttributeNS(NS_ANDROID_URI, "name")
+                for sitem in item.findall(".//category"):
+                    val = sitem.get(NS_ANDROID + "name")
                     if val == "android.intent.category.LAUNCHER":
-                        y.add(item.getAttributeNS(NS_ANDROID_URI, "name"))
+                        y.add(item.get(NS_ANDROID + "name"))
 
         z = x.intersection(y)
         if len(z) > 0:
@@ -639,21 +650,21 @@ class APK(object):
         d = {"action": [], "category": []}
 
         for i in self.xml:
-            for item in self.xml[i].getElementsByTagName(category):
+            for item in self.xml[i].findall(".//" + category):
                 if self.format_value(
-                        item.getAttributeNS(NS_ANDROID_URI, "name")
+                        item.get(NS_ANDROID + "name")
                 ) == name:
-                    for sitem in item.getElementsByTagName("intent-filter"):
-                        for ssitem in sitem.getElementsByTagName("action"):
-                            if ssitem.getAttributeNS(NS_ANDROID_URI, "name") \
+                    for sitem in item.findall(".//intent-filter"):
+                        for ssitem in sitem.findall("action"):
+                            if ssitem.get(NS_ANDROID + "name") \
                                     not in d["action"]:
-                                d["action"].append(ssitem.getAttributeNS(
-                                    NS_ANDROID_URI, "name"))
-                        for ssitem in sitem.getElementsByTagName("category"):
-                            if ssitem.getAttributeNS(NS_ANDROID_URI, "name") \
+                                d["action"].append(ssitem.get(
+                                    NS_ANDROID + "name"))
+                        for ssitem in sitem.findall("category"):
+                            if ssitem.get(NS_ANDROID + "name") \
                                     not in d["category"]:
-                                d["category"].append(ssitem.getAttributeNS(
-                                    NS_ANDROID_URI, "name"))
+                                d["category"].append(ssitem.get(
+                                    NS_ANDROID + "name"))
 
         if not d["action"]:
             del d["action"]
@@ -849,13 +860,30 @@ class APK(object):
         zout = zipfile.ZipFile(filename, 'w')
 
         for item in self.zip.infolist():
+            # Block one: deleted_files, or deleted_files and new_files
             if deleted_files is not None:
                 if re.match(deleted_files, item.filename) is None:
-                    if item.filename in new_files:
-                        zout.writestr(item, new_files[item.filename])
-                    else:
-                        buffer = self.zip.read(item.filename)
-                        zout.writestr(item, buffer)
+                    # if the regex of deleted_files doesn't match the filename
+                    if new_files is not False:
+                        if item.filename in new_files:
+                            # and if the filename is in new_files
+                            zout.writestr(item, new_files[item.filename])
+                            continue
+                    # Otherwise, write the original file.
+                    buffer = self.zip.read(item.filename)
+                    zout.writestr(item, buffer)
+            # Block two: deleted_files is None, new_files is not empty
+            elif new_files is not False:
+                if item.filename in new_files:
+                    zout.writestr(item, new_files[item.filename])
+                else:
+                    buffer = self.zip.read(item.filename)
+                    zout.writestr(item, buffer)
+            # Block three: deleted_files is None, new_files is empty.
+            # Just write out the default zip
+            else:
+                buffer = self.zip.read(item.filename)
+                zout.writestr(item, buffer)
         zout.close()
 
     def get_android_manifest_axml(self):
@@ -989,33 +1017,6 @@ class APK(object):
             show_Certificate(self.get_certificate(c))
 
 
-def get_Name(name, short=False):
-    """
-        Return the distinguished name of an X509 Certificate
-
-        :param name: Name object to return the DN from
-        :param short: Use short form (Default: False)
-
-        :type name: :class:`cryptography.x509.Name`
-        :type short: Boolean
-
-        :rtype: str
-    """
-
-    # For the shortform, we have a lookup table
-    # See RFC4514 for more details
-    sf = {
-        "countryName": "C",
-        "stateOrProvinceName": "ST",
-        "localityName": "L",
-        "organizationalUnitName": "OU",
-        "organizationName": "O",
-        "commonName": "CN",
-        "emailAddress": "E",
-    }
-    return ", ".join(
-        ["{}={}".format(attr.oid._name if not short or attr.oid._name not in sf else sf[attr.oid._name], attr.value) for
-         attr in name])
 
 
 def show_Certificate(cert, short=False):
@@ -1031,7 +1032,5 @@ def show_Certificate(cert, short=False):
 
     for h in [hashes.MD5, hashes.SHA1, hashes.SHA256, hashes.SHA512]:
         print("{}: {}".format(h.name, binascii.hexlify(cert.fingerprint(h())).decode("ascii")))
-    print("Issuer: {}".format(get_Name(cert.issuer, short=short)))
-    print("Subject: {}".format(get_Name(cert.subject, short=short)))
-
-
+    print("Issuer: {}".format(get_certificate_name_string(cert.issuer, short=short)))
+    print("Subject: {}".format(get_certificate_name_string(cert.subject, short=short)))

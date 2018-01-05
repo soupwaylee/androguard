@@ -2,9 +2,6 @@ import unittest
 
 import sys
 
-PATH_INSTALL = "./"
-sys.path.append(PATH_INSTALL)
-
 from androguard.core.bytecodes import apk
 
 
@@ -23,13 +20,43 @@ class APKTest(unittest.TestCase):
         a, d, dx = AnalyzeAPK("examples/android/TestsAndroguard/bin/TestActivity.apk")
 
         self.assertIsInstance(a, APK)
-        self.assertIsInstance(d, DalvikVMFormat)
+        self.assertIsInstance(d[0], DalvikVMFormat)
         self.assertIsInstance(dx, Analysis)
 
         self.assertEqual(a.get_signature_name(), "META-INF/CERT.RSA")
         self.assertEqual(a.get_signature_names(), ["META-INF/CERT.RSA"])
 
         self.assertIsNotNone(a.get_certificate(a.get_signature_name()))
+
+    def testAPKWrapperRaw(self):
+        from androguard.misc import AnalyzeAPK
+        from androguard.core.bytecodes.apk import APK
+        from androguard.core.bytecodes.dvm import DalvikVMFormat
+        from androguard.core.analysis.analysis import Analysis
+        with open(
+            "examples/android/TestsAndroguard/bin/TestActivity.apk", 'rb') \
+                as file_obj:
+            file_contents = file_obj.read()
+        a, d, dx = AnalyzeAPK(file_contents, raw=True)
+        self.assertIsInstance(a, APK)
+        self.assertIsInstance(d[0], DalvikVMFormat)
+        self.assertIsInstance(dx, Analysis)
+
+        self.assertEqual(a.get_signature_name(), "META-INF/CERT.RSA")
+        self.assertEqual(a.get_signature_names(), ["META-INF/CERT.RSA"])
+
+        self.assertIsNotNone(a.get_certificate(a.get_signature_name()))
+
+    def testMultiDexAPK(self):
+        from androguard.misc import AnalyzeAPK
+        from androguard.core.bytecodes.apk import APK
+        from androguard.core.bytecodes.dvm import DalvikVMFormat
+        from androguard.core.analysis.analysis import Analysis
+        a, d, dx = AnalyzeAPK('examples/android/abcore/app-prod-debug.apk')
+        self.assertIsInstance(a, APK)
+        self.assertIsInstance(d[0], DalvikVMFormat)
+        self.assertIsInstance(d[1], DalvikVMFormat)
+        self.assertIsInstance(dx, Analysis)
 
     def testAPKCert(self):
         """
@@ -72,6 +99,8 @@ class APKTest(unittest.TestCase):
         from hashlib import md5, sha1, sha256
         a = APK("examples/android/TestsAndroguard/bin/TestActivity.apk", skip_analysis=True)
 
+        self.assertEqual(a.get_signature_name(), "META-INF/CERT.RSA")
+
         cert = a.get_certificate(a.get_signature_name())
         cert_der = a.get_certificate_der(a.get_signature_name())
 
@@ -95,12 +124,128 @@ class APKTest(unittest.TestCase):
         a, d, dx = AnalyzeAPK("examples/android/TestsAndroguard/bin/TestActivity_unsigned.apk")
 
         self.assertIsInstance(a, APK)
-        self.assertIsInstance(d, DalvikVMFormat)
+        self.assertIsInstance(d[0], DalvikVMFormat)
         self.assertIsInstance(dx, Analysis)
 
         self.assertEqual(a.get_signature_name(), None)
         self.assertEqual(a.get_signature_names(), [])
 
+    def testAPKManifest(self):
+        from androguard.core.bytecodes.apk import APK
+        a = APK("examples/android/TestsAndroguard/bin/TestActivity.apk", testzip=True)
+
+        self.assertEqual(a.get_app_name(), "TestsAndroguardApplication")
+        self.assertEqual(a.get_app_icon(), "res/drawable-hdpi/icon.png")
+        self.assertEqual(a.get_app_icon(max_dpi=120), "res/drawable-ldpi/icon.png")
+        self.assertEqual(a.get_app_icon(max_dpi=160), "res/drawable-mdpi/icon.png")
+        self.assertEqual(a.get_app_icon(max_dpi=240), "res/drawable-hdpi/icon.png")
+        self.assertIsNone(a.get_app_icon(max_dpi=1))
+        self.assertEqual(a.get_main_activity(), "tests.androguard.TestActivity")
+        self.assertEqual(a.get_package(), "tests.androguard")
+        self.assertEqual(a.get_androidversion_code(), '1')
+        self.assertEqual(a.get_androidversion_name(), "1.0")
+        self.assertEqual(a.get_min_sdk_version(), "9")
+        self.assertEqual(a.get_target_sdk_version(), "16")
+        self.assertIsNone(a.get_max_sdk_version())
+        self.assertEqual(a.get_permissions(), [])
+        self.assertEqual(a.get_declared_permissions(), [])
+        self.assertTrue(a.is_valid_APK())
+
+    def testAPKPermissions(self):
+        from androguard.core.bytecodes.apk import APK
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+
+        self.assertEqual(a.get_package(), "a2dp.Vol")
+        self.assertListEqual(sorted(a.get_permissions()), sorted(["android.permission.RECEIVE_BOOT_COMPLETED",
+                                                                  "android.permission.CHANGE_WIFI_STATE",
+                                                                  "android.permission.ACCESS_WIFI_STATE",
+                                                                  "android.permission.KILL_BACKGROUND_PROCESSES",
+                                                                  "android.permission.BLUETOOTH",
+                                                                  "android.permission.BLUETOOTH_ADMIN",
+                                                                  "com.android.launcher.permission.READ_SETTINGS",
+                                                                  "android.permission.RECEIVE_SMS",
+                                                                  "android.permission.MODIFY_AUDIO_SETTINGS",
+                                                                  "android.permission.READ_CONTACTS",
+                                                                  "android.permission.ACCESS_COARSE_LOCATION",
+                                                                  "android.permission.ACCESS_FINE_LOCATION",
+                                                                  "android.permission.ACCESS_LOCATION_EXTRA_COMMANDS",
+                                                                  "android.permission.WRITE_EXTERNAL_STORAGE",
+                                                                  "android.permission.READ_PHONE_STATE",
+                                                                  "android.permission.BROADCAST_STICKY",
+                                                                  "android.permission.GET_ACCOUNTS"]))
+
+    def testAPKActivitiesAreString(self):
+        from androguard.core.bytecodes.apk import APK
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+        activities = a.get_activities()
+        self.assertTrue(isinstance(activities[0], str), 'activities[0] is not of type str')
+
+    def testAPKIntentFilters(self):
+        from androguard.core.bytecodes.apk import APK
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+        activities = a.get_activities()
+        receivers = a.get_receivers()
+        services = a.get_services()
+        filter_list = []
+        for i in activities:
+            filters = a.get_intent_filters("activity", i)
+            if len(filters) > 0:
+                filter_list.append(filters)
+        for i in receivers:
+            filters = a.get_intent_filters("receiver", i)
+            if len(filters) > 0:
+                filter_list.append(filters)
+        for i in services:
+            filters = a.get_intent_filters("service", i)
+            if len(filters) > 0:
+                filter_list.append(filters)
+        pairs = zip(filter_list, [{'action': ['android.intent.action.MAIN'], 'category': ['android.intent.category.LAUNCHER']},
+                                                         {'action': ['android.service.notification.NotificationListenerService']},
+                                                         {'action': ['android.intent.action.BOOT_COMPLETED', 'android.intent.action.MY_PACKAGE_REPLACED'], 'category': ['android.intent.category.HOME']},
+                                                         {'action': ['android.appwidget.action.APPWIDGET_UPDATE']}])
+        self.assertTrue(any(x != y for x, y in pairs))
+
+    def testNewZipWithoutModification(self):
+        from androguard.core.bytecodes.apk import APK
+        try:
+            from unittest.mock import patch, MagicMock
+        except:
+            from mock import patch, MagicMock
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+        with patch('zipfile.ZipFile') as zipFile:
+            mockZip = MagicMock()
+            zipFile.return_value=mockZip
+            a.new_zip("testout.apk")
+            self.assertTrue(mockZip.writestr.call_count == 48)
+            self.assertTrue(mockZip.close.called)
+
+    def testNewZipWithDeletedFile(self):
+        from androguard.core.bytecodes.apk import APK
+        try:
+            from unittest.mock import patch, MagicMock
+        except:
+            from mock import patch, MagicMock
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+        with patch('zipfile.ZipFile') as zipFile:
+            mockZip = MagicMock()
+            zipFile.return_value=mockZip
+            a.new_zip("testout.apk", deleted_files="res/menu/menu.xml")
+            self.assertTrue(mockZip.writestr.call_count == 47)
+            self.assertTrue(mockZip.close.called)
+
+    def testNewZipWithNewFile(self):
+        from androguard.core.bytecodes.apk import APK
+        try:
+            from unittest.mock import patch, MagicMock
+        except:
+            from mock import patch, MagicMock
+        a = APK("examples/tests/a2dp.Vol_137.apk", testzip=True)
+        with patch('zipfile.ZipFile') as zipFile:
+            mockZip = MagicMock()
+            zipFile.return_value=mockZip
+            a.new_zip("testout.apk", new_files={'res/menu/menu.xml': 'content'})
+            self.assertTrue(mockZip.writestr.call_count == 48)
+            self.assertTrue(mockZip.close.called)
 
 
 if __name__ == '__main__':
